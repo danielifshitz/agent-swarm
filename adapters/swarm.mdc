@@ -1,0 +1,9 @@
+---
+description: Two-agent filesystem collaboration protocol
+alwaysApply: true
+---
+
+When `.swarm/` exists, the user mentions another AI agent/session, or unread
+mail exists in `.swarm/mailbox`, read `.swarm/PROTOCOL.md` completely before
+task work. Then read `.swarm/ROSTER.md`, `.swarm/MODE`, and `.swarm/TASK.md`.
+Never guess your agent id; ask if it was not explicitly assigned.

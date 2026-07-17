@@ -1,0 +1,232 @@
+#!/bin/sh
+set -eu
+
+SWARM_ROOT=${SWARM_ROOT:-}
+if [ -z "$SWARM_ROOT" ]; then
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  if [ "$(basename -- "$script_dir")" = ".swarm" ]; then
+    SWARM_ROOT=$script_dir
+  elif [ -d "$PWD/.swarm" ]; then
+    SWARM_ROOT=$PWD/.swarm
+  else
+    printf '%s\n' "error: cannot locate .swarm (set SWARM_ROOT)" >&2
+    exit 2
+  fi
+fi
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 2
+}
+
+valid_id() {
+  case ${1-} in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+valid_filename() {
+  case ${1-} in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+mailbox() {
+  valid_id "$1" || die "invalid agent id: $1"
+  printf '%s/mailbox/%s\n' "$SWARM_ROOT" "$1"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: .swarm/swarm COMMAND [arguments]
+
+Commands:
+  validate
+  send --from ID --to ID --status STATUS --round N [--final-ref FILE]
+       [--body-file FILE]
+  inbox ID
+  read ID MESSAGE_FILE
+  archive ID MESSAGE_FILE
+  wait ID [TIMEOUT_SECONDS]
+  transcript
+  help
+
+Without --body-file, send reads the message body from standard input.
+EOF
+}
+
+cmd_validate() {
+  failed=0
+  for name in PROTOCOL.md ROSTER.md MODE TASK.md swarm; do
+    if [ ! -e "$SWARM_ROOT/$name" ]; then
+      printf 'missing: .swarm/%s\n' "$name" >&2
+      failed=1
+    fi
+  done
+  mode=$(tr -d '[:space:]' < "$SWARM_ROOT/MODE" 2>/dev/null || true)
+  case $mode in
+    plan|review|brainstorm) ;;
+    *) printf 'invalid: .swarm/MODE must be plan, review, or brainstorm\n' >&2; failed=1 ;;
+  esac
+  for id in agent-a agent-b; do
+    dir=$(mailbox "$id")
+    if [ ! -d "$dir/read" ]; then
+      printf 'missing: .swarm/mailbox/%s/read\n' "$id" >&2
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ] || exit 1
+  printf 'ok: swarm workspace (%s mode)\n' "$mode"
+}
+
+cmd_send() {
+  from= to= status= round= final_ref= body_file=
+  while [ "$#" -gt 0 ]; do
+    case $1 in
+      --from) [ "$#" -ge 2 ] || die "--from needs a value"; from=$2; shift 2 ;;
+      --to) [ "$#" -ge 2 ] || die "--to needs a value"; to=$2; shift 2 ;;
+      --status) [ "$#" -ge 2 ] || die "--status needs a value"; status=$2; shift 2 ;;
+      --round) [ "$#" -ge 2 ] || die "--round needs a value"; round=$2; shift 2 ;;
+      --final-ref) [ "$#" -ge 2 ] || die "--final-ref needs a value"; final_ref=$2; shift 2 ;;
+      --body-file) [ "$#" -ge 2 ] || die "--body-file needs a value"; body_file=$2; shift 2 ;;
+      *) die "unknown send option: $1" ;;
+    esac
+  done
+
+  valid_id "$from" || die "invalid or missing --from"
+  valid_id "$to" || die "invalid or missing --to"
+  [ "$from" != "$to" ] || die "sender and recipient must differ"
+  case $status in
+    PROPOSAL|QUESTION|RESPONSE|OBJECTION|VERIFICATION|FINAL|AGREEMENT|STALEMATE) ;;
+    *) die "invalid or missing --status" ;;
+  esac
+  case $round in
+    ''|*[!0-9]*|0) die "--round must be a positive integer" ;;
+  esac
+  if [ "$status" = AGREEMENT ]; then
+    valid_filename "$final_ref" || die "AGREEMENT requires --final-ref FINAL_FILENAME"
+  elif [ -n "$final_ref" ]; then
+    die "--final-ref is only valid with AGREEMENT"
+  fi
+  if [ -n "$body_file" ] && [ ! -f "$body_file" ]; then
+    die "body file not found: $body_file"
+  fi
+
+  destination=$(mailbox "$to")
+  [ -d "$destination/read" ] || die "recipient mailbox does not exist: $to"
+  umask 077
+  stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+  sequence=0
+  while :; do
+    suffix="$$-$sequence"
+    final="$destination/${stamp}-from-${from}-${status}-${suffix}.md"
+    [ -e "$final" ] || break
+    sequence=$((sequence + 1))
+  done
+  tmp="$destination/.tmp-$$-$sequence"
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+  {
+    printf 'From: %s\nTo: %s\nStatus: %s\nRound: %s\n' "$from" "$to" "$status" "$round"
+    if [ -n "$final_ref" ]; then
+      printf 'Final-Ref: %s\n' "$final_ref"
+    fi
+    printf '\n'
+    if [ -n "$body_file" ]; then
+      cat -- "$body_file"
+    else
+      cat
+    fi
+  } > "$tmp"
+  mv -- "$tmp" "$final"
+  trap - EXIT HUP INT TERM
+  basename -- "$final"
+}
+
+cmd_inbox() {
+  [ "$#" -eq 1 ] || die "inbox requires AGENT_ID"
+  dir=$(mailbox "$1")
+  [ -d "$dir" ] || die "mailbox does not exist: $1"
+  found=0
+  for file in "$dir"/*.md; do
+    [ -e "$file" ] || continue
+    basename -- "$file"
+    found=1
+  done
+  [ "$found" -eq 1 ] || printf '%s\n' "(empty)"
+}
+
+cmd_read() {
+  [ "$#" -eq 2 ] || die "read requires AGENT_ID MESSAGE_FILE"
+  valid_filename "$2" || die "invalid message filename"
+  dir=$(mailbox "$1")
+  file=$dir/$2
+  [ -f "$file" ] || die "unread message not found: $2"
+  cat -- "$file"
+}
+
+cmd_archive() {
+  [ "$#" -eq 2 ] || die "archive requires AGENT_ID MESSAGE_FILE"
+  valid_filename "$2" || die "invalid message filename"
+  dir=$(mailbox "$1")
+  source_file=$dir/$2
+  target_file=$dir/read/$2
+  [ -f "$source_file" ] || die "unread message not found: $2"
+  [ ! -e "$target_file" ] || die "archive already contains: $2"
+  mv -- "$source_file" "$target_file"
+  printf 'archived: %s\n' "$2"
+}
+
+cmd_wait() {
+  [ "$#" -ge 1 ] && [ "$#" -le 2 ] || die "wait requires AGENT_ID [TIMEOUT_SECONDS]"
+  dir=$(mailbox "$1")
+  [ -d "$dir" ] || die "mailbox does not exist: $1"
+  timeout_seconds=${2:-900}
+  case $timeout_seconds in
+    ''|*[!0-9]*) die "timeout must be a non-negative integer" ;;
+  esac
+  started=$(date '+%s')
+  while :; do
+    for file in "$dir"/*.md; do
+      if [ -e "$file" ]; then
+        basename -- "$file"
+        return 0
+      fi
+    done
+    now=$(date '+%s')
+    if [ $((now - started)) -ge "$timeout_seconds" ]; then
+      printf 'timeout: no message for %s after %s seconds\n' "$1" "$timeout_seconds" >&2
+      return 124
+    fi
+    sleep 1
+  done
+}
+
+cmd_transcript() {
+  [ -d "$SWARM_ROOT/mailbox" ] || die "mailbox directory not found"
+  find "$SWARM_ROOT/mailbox" -type f -name '*.md' \
+    | awk -F/ '{print $NF "\t" $0}' \
+    | LC_ALL=C sort \
+    | cut -f2- \
+    | while IFS= read -r file; do
+        relative=${file#"$SWARM_ROOT/"}
+        printf '===== .swarm/%s =====\n' "$relative"
+        cat -- "$file"
+        printf '\n'
+      done
+}
+
+command=${1:-help}
+[ "$#" -eq 0 ] || shift
+case $command in
+  validate) [ "$#" -eq 0 ] || die "validate takes no arguments"; cmd_validate ;;
+  send) cmd_send "$@" ;;
+  inbox) cmd_inbox "$@" ;;
+  read) cmd_read "$@" ;;
+  archive) cmd_archive "$@" ;;
+  wait) cmd_wait "$@" ;;
+  transcript) [ "$#" -eq 0 ] || die "transcript takes no arguments"; cmd_transcript ;;
+  help|-h|--help) usage ;;
+  *) usage >&2; die "unknown command: $command" ;;
+esac
