@@ -12,7 +12,10 @@ Before changing the task artifact:
 2. Read the section below for the selected mode.
 3. Determine your agent id from the user's instruction. If it is not explicit,
    stop and ask. Never infer it from runtime names or roster order.
-4. Run `.swarm/swarm validate` and `.swarm/swarm inbox <your-id>`.
+4. Run `.swarm/swarm validate`.
+5. Follow the selected mode's launch behavior. In plan and review, check your
+   inbox. In a new brainstorm run, send your independent Round 1 contribution
+   before reading the peer's mail.
 
 Do not continue alone after a run has started. A missing or timed-out peer is an
 outcome to report, not permission to impersonate it.
@@ -49,6 +52,9 @@ message into `read/`; it never deletes it.
 `.swarm/swarm transcript` reads both mailboxes. It is for the human or the final
 handoff; agents must not use it during an active run to inspect the peer's
 unread inbox.
+
+The human can run `.swarm/swarm prompts` after preparing MODE, TASK, and ROSTER
+to print the two mode-aware launch prompts verbatim.
 
 ### Message format
 

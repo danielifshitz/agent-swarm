@@ -51,6 +51,7 @@ Commands:
   archive ID MESSAGE_FILE
   wait ID [TIMEOUT_SECONDS]
   transcript
+  prompts
   help
 
 Without --body-file, send reads the message body from standard input.
@@ -77,6 +78,37 @@ cmd_validate() {
       failed=1
     fi
   done
+  for heading in '## Goal' '## Artifact' '## Constraints' '## Definition of done' '## Out of scope'; do
+    if ! grep -q "^$heading$" "$SWARM_ROOT/TASK.md" 2>/dev/null; then
+      printf 'invalid: .swarm/TASK.md is missing %s\n' "$heading" >&2
+      failed=1
+    fi
+  done
+  if grep -Eq 'What should the two agents produce|Give the path under discussion|List non-negotiable requirements|State checks that an agent can verify|State what the agents must not expand into' "$SWARM_ROOT/TASK.md" 2>/dev/null; then
+    printf '%s\n' 'invalid: .swarm/TASK.md still contains template placeholders' >&2
+    failed=1
+  fi
+  if ! grep -Eq '^- starter:[[:space:]]*agent-a[[:space:]]*$' "$SWARM_ROOT/ROSTER.md" 2>/dev/null ||
+     ! grep -Eq '^- artifact_owner:[[:space:]]*agent-a[[:space:]]*$' "$SWARM_ROOT/ROSTER.md" 2>/dev/null; then
+    printf '%s\n' 'invalid: starter and artifact_owner must be agent-a' >&2
+    failed=1
+  fi
+  case $mode in
+    review)
+      if ! grep -Eq '^\|[[:space:]]*agent-a[[:space:]]*\|[^|]*\|[[:space:]]*author[[:space:]]*\|' "$SWARM_ROOT/ROSTER.md" 2>/dev/null ||
+         ! grep -Eq '^\|[[:space:]]*agent-b[[:space:]]*\|[^|]*\|[[:space:]]*reviewer[[:space:]]*\|' "$SWARM_ROOT/ROSTER.md" 2>/dev/null; then
+        printf '%s\n' 'invalid: review mode requires agent-a=author and agent-b=reviewer' >&2
+        failed=1
+      fi
+      ;;
+    plan|brainstorm)
+      if ! grep -Eq '^\|[[:space:]]*agent-a[[:space:]]*\|[^|]*\|[[:space:]]*peer[[:space:]]*\|' "$SWARM_ROOT/ROSTER.md" 2>/dev/null ||
+         ! grep -Eq '^\|[[:space:]]*agent-b[[:space:]]*\|[^|]*\|[[:space:]]*peer[[:space:]]*\|' "$SWARM_ROOT/ROSTER.md" 2>/dev/null; then
+        printf 'invalid: %s mode requires both agents to be peers\n' "$mode" >&2
+        failed=1
+      fi
+      ;;
+  esac
   [ "$failed" -eq 0 ] || exit 1
   printf 'ok: swarm workspace (%s mode)\n' "$mode"
 }
@@ -217,6 +249,66 @@ cmd_transcript() {
       done
 }
 
+cmd_prompts() {
+  cmd_validate >/dev/null
+  mode=$(tr -d '[:space:]' < "$SWARM_ROOT/MODE" 2>/dev/null || true)
+  case $mode in
+    plan|review|brainstorm) ;;
+    *) die ".swarm/MODE must be plan, review, or brainstorm before generating prompts" ;;
+  esac
+  workspace=$(dirname -- "$SWARM_ROOT")
+
+  print_common() {
+    agent_id=$1
+    printf '%s\n' "You are $agent_id in a two-agent swarm run. Work only as $agent_id: never read the peer's inbox, write into your own inbox, or send a message using the peer's identity."
+    printf '\nThe shared workspace is:\n%s\n' "$workspace"
+    printf '%s\n' '
+Before changing any task artifact, change to that workspace and read these files completely, in this order:
+1. .swarm/PROTOCOL.md
+2. .swarm/ROSTER.md
+3. .swarm/MODE
+4. .swarm/TASK.md
+
+Then run `.swarm/swarm validate`. Follow the protocol and selected mode exactly. Use `.swarm/swarm` for every mailbox operation. Ground every artifact claim with a path and line, and every behavioral claim with a command and its result.'
+  }
+
+  printf '%s\n' '===== COPY THIS PROMPT TO AGENT A ====='
+  print_common agent-a
+  case $mode in
+    review)
+      printf '%s\n' '
+You are the author, artifact owner, and starter. Inspect the current artifact state, then send the opening PROPOSAL to agent-b. Address every numbered reviewer finding; you are the only agent allowed to modify tracked files.'
+      ;;
+    plan)
+      printf '%s\n' '
+You are a peer, the artifact owner, and the starter. Do not edit the task artifact during discussion. Inspect it, then send the opening grounded PROPOSAL to agent-b.'
+      ;;
+    brainstorm)
+      printf '%s\n' "
+You are a peer and the artifact owner. After validation, do not inspect your inbox. Independently generate at least the roster's ideas_min one-line ideas and send your Round 1 PROPOSAL to agent-b. Only after sending it may you inspect your inbox."
+      ;;
+  esac
+  printf '\n%s\n' '===== END AGENT A PROMPT ====='
+
+  printf '\n%s\n' '===== COPY THIS PROMPT TO AGENT B ====='
+  print_common agent-b
+  case $mode in
+    review)
+      printf '%s\n' '
+You are the reviewer. Never modify tracked files. After validation, check `.swarm/swarm inbox agent-b`; if it is empty, run `.swarm/swarm wait agent-b 900`. Independently inspect the diff and files and run relevant tests before sending numbered, severity-labeled findings.'
+      ;;
+    plan)
+      printf '%s\n' '
+You are a peer and not the artifact owner. Do not edit the task artifact. After validation, check `.swarm/swarm inbox agent-b`; if it is empty, run `.swarm/swarm wait agent-b 900`, then independently inspect the artifact before responding.'
+      ;;
+    brainstorm)
+      printf '%s\n' "
+You are a peer and not the artifact owner. After validation, do not inspect your inbox. Independently generate at least the roster's ideas_min one-line ideas and send your Round 1 PROPOSAL to agent-a. Only after sending it may you inspect your inbox."
+      ;;
+  esac
+  printf '\n%s\n' '===== END AGENT B PROMPT ====='
+}
+
 command=${1:-help}
 [ "$#" -eq 0 ] || shift
 case $command in
@@ -227,6 +319,7 @@ case $command in
   archive) cmd_archive "$@" ;;
   wait) cmd_wait "$@" ;;
   transcript) [ "$#" -eq 0 ] || die "transcript takes no arguments"; cmd_transcript ;;
+  prompts) [ "$#" -eq 0 ] || die "prompts takes no arguments"; cmd_prompts ;;
   help|-h|--help) usage ;;
   *) usage >&2; die "unknown command: $command" ;;
 esac

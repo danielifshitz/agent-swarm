@@ -9,11 +9,10 @@ usage() {
 Usage: install.sh [WORKSPACE] [--adapters LIST] [--force]
 
 LIST is a comma-separated selection of:
-  standard   .agents/skills/swarm (cross-agent convention)
-  codex      .codex/skills/swarm
-  claude     .claude/skills/swarm
-  cursor     .cursor/rules/swarm.mdc
-  agents-md  append a small guarded block to AGENTS.md
+  standard   .agents/skills/{swarm,swarm-init} (cross-agent convention)
+  claude     .claude/skills/{swarm,swarm-init}
+  cursor     .cursor/rules/{swarm,swarm-init}.mdc
+  agents-md  install standard skills and append guarded AGENTS.md guidance
   all        all of the above (default)
   none       protocol files only
 
@@ -45,13 +44,25 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ "$target_set" -eq 1 ] || {
+  if command -v git >/dev/null 2>&1 && git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    target=$git_root
+  fi
+}
 [ -d "$target" ] || { printf 'error: no such workspace: %s\n' "$target" >&2; exit 2; }
 target=$(CDPATH= cd -- "$target" && pwd)
 
 script_path=$0
 case $script_path in
   */*) source_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" 2>/dev/null && pwd || true) ;;
-  *) source_dir= ;;
+  sh|bash|dash|zsh|-*) source_dir= ;;
+  *)
+    if [ -f "$PWD/$script_path" ]; then
+      source_dir=$PWD
+    else
+      source_dir=
+    fi
+    ;;
 esac
 
 cleanup_dir=
@@ -62,7 +73,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ -z "$source_dir" ] || [ ! -f "$source_dir/skill/SKILL.md" ] || [ ! -f "$source_dir/core/swarm" ]; then
+if [ -z "$source_dir" ] || [ ! -f "$source_dir/skills/swarm/SKILL.md" ] || [ ! -f "$source_dir/core/swarm" ]; then
   repo=${SWARM_GITHUB_REPO:-danielifshitz/agent-swarm}
   ref=${SWARM_REF:-main}
   cleanup_dir=$(mktemp -d "${TMPDIR:-/tmp}/agent-swarm.XXXXXX")
@@ -79,7 +90,7 @@ if [ -z "$source_dir" ] || [ ! -f "$source_dir/skill/SKILL.md" ] || [ ! -f "$sou
   tar -xzf "$archive" -C "$cleanup_dir"
   source_dir=
   for candidate in "$cleanup_dir"/*; do
-    if [ -d "$candidate" ] && [ -f "$candidate/skill/SKILL.md" ]; then
+    if [ -d "$candidate" ] && [ -f "$candidate/skills/swarm/SKILL.md" ]; then
       source_dir=$candidate
       break
     fi
@@ -88,14 +99,14 @@ if [ -z "$source_dir" ] || [ ! -f "$source_dir/skill/SKILL.md" ] || [ ! -f "$sou
 fi
 
 expanded=$adapters
-[ "$expanded" = all ] && expanded=standard,codex,claude,cursor,agents-md
+[ "$expanded" = all ] && expanded=standard,claude,cursor,agents-md
 old_ifs=$IFS
 IFS=,
 set -- $expanded
 IFS=$old_ifs
 for adapter in "$@"; do
   case $adapter in
-    standard|codex|claude|cursor|agents-md|none) ;;
+    standard|claude|cursor|agents-md|none) ;;
     '') printf '%s\n' "error: empty adapter name" >&2; exit 2 ;;
     *) printf 'error: unknown adapter: %s\n' "$adapter" >&2; exit 2 ;;
   esac
@@ -118,26 +129,52 @@ for name in ROSTER.md TASK.md MODE; do
   fi
 done
 
-install_skill() {
-  destination=$1
-  mkdir -p "$destination/agents"
-  cp "$source_dir/skill/SKILL.md" "$destination/SKILL.md"
-  cp "$source_dir/skill/agents/openai.yaml" "$destination/agents/openai.yaml"
+install_skills() {
+  skills_root=$1
+  for skill_name in swarm swarm-init; do
+    destination=$skills_root/$skill_name
+    mkdir -p "$destination/agents"
+    cp "$source_dir/skills/$skill_name/SKILL.md" "$destination/SKILL.md"
+    cp "$source_dir/skills/$skill_name/agents/openai.yaml" "$destination/agents/openai.yaml"
+  done
 }
 
+standard_installed=0
 for adapter in "$@"; do
   case $adapter in
-    standard) install_skill "$target/.agents/skills/swarm" ;;
-    codex) install_skill "$target/.codex/skills/swarm" ;;
-    claude) install_skill "$target/.claude/skills/swarm" ;;
+    standard)
+      install_skills "$target/.agents/skills"
+      standard_installed=1
+      ;;
+    claude) install_skills "$target/.claude/skills" ;;
     cursor)
       mkdir -p "$target/.cursor/rules"
       cp "$source_dir/adapters/swarm.mdc" "$target/.cursor/rules/swarm.mdc"
+      cp "$source_dir/adapters/swarm-init.mdc" "$target/.cursor/rules/swarm-init.mdc"
       ;;
     agents-md)
+      if [ "$standard_installed" -eq 0 ]; then
+        install_skills "$target/.agents/skills"
+        standard_installed=1
+      fi
       agents_file=$target/AGENTS.md
       if [ -f "$agents_file" ] && grep -q '<!-- swarm:start -->' "$agents_file"; then
-        printf '%s\n' "preserved: existing Swarm block in AGENTS.md"
+        grep -q '<!-- swarm:end -->' "$agents_file" || {
+          printf '%s\n' "error: AGENTS.md has a Swarm start marker without an end marker" >&2
+          exit 1
+        }
+        agents_tmp=$target/.agents-swarm-$$.tmp
+        awk -v fragment="$source_dir/adapters/AGENTS.fragment.md" '
+          /<!-- swarm:start -->/ {
+            while ((getline line < fragment) > 0) print line
+            close(fragment)
+            skipping = 1
+            next
+          }
+          skipping && /<!-- swarm:end -->/ { skipping = 0; next }
+          !skipping { print }
+        ' "$agents_file" > "$agents_tmp"
+        mv "$agents_tmp" "$agents_file"
       else
         if [ -s "$agents_file" ]; then printf '\n' >> "$agents_file"; fi
         cat "$source_dir/adapters/AGENTS.fragment.md" >> "$agents_file"
@@ -148,4 +185,4 @@ for adapter in "$@"; do
 done
 
 printf 'installed: agent-swarm -> %s\n' "$target"
-printf '%s\n' "next: edit .swarm/TASK.md and .swarm/ROSTER.md, set .swarm/MODE, then run .swarm/swarm validate"
+printf '%s\n' "next: invoke \$swarm-init with your task, or configure .swarm files manually and run .swarm/swarm validate"

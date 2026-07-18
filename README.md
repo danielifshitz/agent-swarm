@@ -1,14 +1,52 @@
 # agent-swarm
 
-A portable skill for two AI agents collaborating in one workspace. Agents plan,
-review, or brainstorm through an auditable filesystem mailbox—without a server,
-daemon, API, or vendor-specific runtime.
+A portable protocol for two AI agents collaborating in one workspace. Agents
+plan, review, or brainstorm through an auditable filesystem mailbox—without a
+server, daemon, API, or vendor-specific runtime.
 
 It works with any agent that can read workspace files and run a POSIX-style
-shell. Project-local skill adapters are installed for the cross-agent
-`.agents/skills` convention, Codex, Claude Code, and Cursor.
+shell. The installer adds standard `.agents/skills` for Codex and GitHub
+Copilot, native skill copies for Claude Code, Cursor rules, and generic
+`AGENTS.md` guidance.
 
-## Install
+## Agent-first installation
+
+Give one agent this prompt from inside the target workspace:
+
+```text
+Read and follow this bootstrap document exactly:
+
+https://raw.githubusercontent.com/danielifshitz/agent-swarm/main/BOOTSTRAP.md
+
+Prepare a two-agent swarm for this task:
+
+<describe the task here>
+```
+
+The initializer discovers the workspace root, installs agent-swarm, understands
+the requested outcome, infers the internal workflow, writes all run files,
+validates them, and returns exact prompts for Agent A and Agent B. The user does
+not choose a protocol mode or edit configuration files.
+
+```mermaid
+flowchart LR
+    U["User gives bootstrap URL<br/>and natural-language goal"] --> I["Initializer agent"]
+    I --> W["Detect workspace root"]
+    W --> D["Download and install"]
+    D --> S["Read swarm-init"]
+    S --> F["Infer internal workflow"]
+    F --> C["Write MODE, TASK, ROSTER"]
+    C --> V{"Validation passes?"}
+    V -- "No: fix setup" --> C
+    V -- Yes --> P["Return exact Agent A<br/>and Agent B prompts"]
+```
+
+This path works with Codex, Claude Code, Cursor, and GitHub Copilot Agent mode.
+Terminal execution may require the user's normal approval. Agent A and Agent B
+must be independent sessions sharing the same local checkout; separate cloud
+agents usually do not share a filesystem.
+
+## Manual installation
 
 From a clone:
 
@@ -17,13 +55,14 @@ git clone https://github.com/danielifshitz/agent-swarm.git
 agent-swarm/install.sh /path/to/your/workspace
 ```
 
-Or directly into the current workspace:
+Or install into the current Git repository root (falling back to the current
+directory outside Git):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/danielifshitz/agent-swarm/main/install.sh | sh
 ```
 
-The remote command defaults to the current directory. To target another one:
+To target another workspace explicitly:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/danielifshitz/agent-swarm/main/install.sh |
@@ -34,33 +73,57 @@ For a fork, set `SWARM_GITHUB_REPO=owner/repository` and optionally
 `SWARM_REF=branch`. Packagers can set `SWARM_ARCHIVE_URL` to a complete source
 archive URL.
 
-## Start a run
+## Initialize manually with `$swarm-init`
 
-1. Fill in `.swarm/TASK.md`.
-2. Set the two agents and parameters in `.swarm/ROSTER.md`.
-3. Choose a mode:
+After installation, ask an agent in the target workspace:
 
-   ```sh
-   printf '%s\n' review > .swarm/MODE
-   # or: plan / brainstorm
-   ```
+```text
+Use $swarm-init to prepare this task for two collaborating agents: <your task>
+```
 
-4. Check the workspace:
+The initializer infers the internal workflow and writes a concrete task and
+matching roster. To prepare the files without skill invocation, fill in
+`.swarm/TASK.md`, `.swarm/ROSTER.md`, and `.swarm/MODE`, then run:
 
-   ```sh
-   .swarm/swarm validate
-   ```
+```sh
+.swarm/swarm validate
+.swarm/swarm prompts
+```
 
-5. Open two independent agent sessions and assign identities explicitly:
+Invoke `$swarm` only inside a prepared run after assigning that session either
+`agent-a` or `agent-b`. Never let sessions infer their identities.
 
-   - “You are agent-a. Read `.swarm/PROTOCOL.md` completely and begin.”
-   - “You are agent-b. Read `.swarm/PROTOCOL.md` completely and begin.”
+## Runtime lifecycle
 
-Never let sessions infer their identities.
+```mermaid
+sequenceDiagram
+    participant H as Human
+    participant A as Agent A
+    participant Mailbox as .swarm/mailbox
+    participant B as Agent B
+    H->>A: Paste generated Agent A prompt
+    H->>B: Paste generated Agent B prompt
+    A->>Mailbox: Opening proposal
+    Mailbox->>B: Read and archive
+    B->>Mailbox: Grounded response or objection
+    Mailbox->>A: Read and archive
+    loop Until final or round cap
+        A->>Mailbox: Evidence-backed message
+        Mailbox->>B: Peer verifies independently
+    end
+    A->>Mailbox: FINAL
+    B->>Mailbox: VERIFICATION or OBJECTION
+    A->>Mailbox: AGREEMENT with Final-Ref
+    B->>Mailbox: AGREEMENT with same Final-Ref
+    A-->>H: Consensus or documented stalemate
+    B-->>H: Consensus or documented stalemate
+```
+
+The filesystem mailboxes are single-writer/single-reader channels. Messages are
+written through a unique temporary file and atomically renamed, then archived
+without deletion after processing.
 
 ## Mailbox command
-
-Agents use one command for all channel operations:
 
 ```sh
 printf '%s\n' 'Finding grounded at src/auth.py:88.' |
@@ -80,34 +143,31 @@ Run `.swarm/swarm help` for the complete command list.
 
 ```sh
 ./install.sh . --adapters all
-./install.sh . --adapters standard,codex
+./install.sh . --adapters standard,claude
 ./install.sh . --adapters none
 ./install.sh . --force
 ```
 
-Adapters:
-
-| Name | Installed path |
+| Adapter | Installed path |
 |---|---|
-| `standard` | `.agents/skills/swarm/` |
-| `codex` | `.codex/skills/swarm/` |
-| `claude` | `.claude/skills/swarm/` |
-| `cursor` | `.cursor/rules/swarm.mdc` |
-| `agents-md` | guarded instructions appended to `AGENTS.md` |
+| `standard` | `.agents/skills/{swarm,swarm-init}/` |
+| `claude` | `.claude/skills/{swarm,swarm-init}/` |
+| `cursor` | `.cursor/rules/{swarm,swarm-init}.mdc` |
+| `agents-md` | Standard skills plus guarded `AGENTS.md` guidance |
 
 Re-running the installer upgrades the protocol, command, and adapters while
 preserving `.swarm/TASK.md`, `.swarm/ROSTER.md`, and `.swarm/MODE`. Use
-`--force` only when you intentionally want to reset those three files.
+`--force` only when intentionally resetting those three files.
 
-## Modes
+## Internal workflows
 
-- `plan`: symmetric critique followed by an agreed plan or precise edit list.
 - `review`: an author fixes numbered findings from a read-only reviewer.
-- `brainstorm`: independent generation first, evaluation later, disagreements
-  preserved rather than forced into consensus.
+- `plan`: symmetric critique produces an agreed plan or precise edit list.
+- `brainstorm`: independent generation happens before evaluation, preserving
+  unresolved differences rather than forcing consensus.
 
-All modes require evidence-backed claims, prohibit first-response agreement to a
-FINAL, and preserve either a consensus record or a documented stalemate.
+These names are internal protocol state. `$swarm-init` infers the appropriate
+workflow from the requested outcome; the user never needs to select one.
 
 ## Development
 
@@ -115,8 +175,10 @@ FINAL, and preserve either a consensus record or a documented stalemate.
 sh tests/test.sh
 ```
 
-The test performs clean installation, upgrade-preservation, mailbox, collision,
-timeout, adapter, validation, and transcript checks in temporary workspaces.
+CI and the local suite cover clean and streamed installation, Git-root
+detection, configuration-preserving upgrades, skills and adapters, task/roster
+validation, prompt generation, mailbox collisions, timeout behavior, archive
+and transcript behavior, and the agent bootstrap contract on macOS and Linux.
 
 ## License
 

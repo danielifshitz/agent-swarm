@@ -1,0 +1,4 @@
+interface:
+  display_name: "Initialize Swarm"
+  short_description: "Prepare a two-agent swarm run"
+  default_prompt: "Use $swarm-init to prepare this task for two collaborating agents."

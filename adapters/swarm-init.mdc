@@ -1,0 +1,19 @@
+---
+description: Initialize a new two-agent swarm run and generate both launch prompts
+alwaysApply: false
+---
+
+Prepare the run without participating as either agent.
+
+1. Refuse to overwrite a run with existing mailbox records or UNRESOLVED.md.
+2. Infer the internal workflow from the requested outcome without asking the
+   user to choose: use review for existing changes, plan for a concrete plan,
+   or brainstorm for divergence-first ideation.
+3. Write a concrete `.swarm/TASK.md` with Goal, Artifact, Constraints,
+   Definition of done, and Out of scope; leave no template prompts.
+4. Write the mode word to `.swarm/MODE` and set mode-correct roles in ROSTER:
+   review uses agent-a=author and agent-b=reviewer; other modes use two peers.
+   Keep agent-a as starter and artifact owner.
+5. Run `.swarm/swarm validate`, fix errors, then run `.swarm/swarm prompts`.
+6. Return the prompts verbatim and tell the user to paste each into a separate
+   independent agent session.
